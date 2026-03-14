@@ -4,6 +4,7 @@
 // @version      1.0.2
 // @description  Monitoramento contínuo com histórico, verificação manual e notificação anti-spam quando surgir vaga.
 // @author       John Wiliam
+//@icon          https://web.whatsapp.com//favicon/1x/favicon/v1/
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_notification
