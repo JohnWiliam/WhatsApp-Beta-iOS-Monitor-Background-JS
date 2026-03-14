@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp Beta Monitor Background
 // @namespace    http://tampermonkey.net/
-// @version      1.1.0
+// @version      1.0.2
 // @description  Monitoramento contínuo com histórico, verificação manual e notificação anti-spam quando surgir vaga.
 // @author       John Wiliam
 // @match        *://*/*
@@ -651,6 +651,6 @@
      * INICIALIZAÇÃO
      * ============================ */
     GM_registerMenuCommand('Ver Histórico de Verificação', displayHistoryUI, 'h');
-    console.log('🔎 Monitoramento de alta precisão v1.1.0 iniciado...');
+    console.log('🔎 Monitoramento de alta precisão v1.0.2 iniciado...');
     initLeaderElection();
 })();
