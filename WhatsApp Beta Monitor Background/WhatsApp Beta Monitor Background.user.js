@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         WhatsApp Beta Monitor Background
 // @namespace    http://tampermonkey.net/
-// @version      1.0
-// @description  Monitoramento de alta precisão com interface de histórico moderna, verificação manual e opção para limpar logs.
+// @version      1.1
+// @description  Monitoramento contínuo com histórico, verificação manual e notificação anti-spam quando surgir vaga.
 // @author       John Wiliam
 // @match        *://*/*
 // @grant        GM_xmlhttpRequest
@@ -22,14 +22,28 @@
      * ============================ */
     const TESTFLIGHT_URL = "https://testflight.apple.com/join/s4rTJVPb";
     const CHECK_INTERVAL = 300000; // 5 minutos (em ms)
+    const REQUEST_TIMEOUT = 20000; // 20 segundos
     const HISTORY_KEY = "whatsappBetaHistory";
     const MAX_HISTORY_ENTRIES = 100;
+    const LAST_ALERT_AT_KEY = "whatsappBetaLastAlertAt";
+    const ALERT_COOLDOWN_MS = 1800000; // 30 minutos
+
+    // Evita múltiplas instâncias monitorando ao mesmo tempo em vários contexts/tabs
+    const LEADER_LOCK_KEY = "whatsappBetaLeaderLock";
+    const LEADER_ID = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const LEADER_TTL_MS = 120000;
+    const LEADER_HEARTBEAT_MS = 30000;
+
+    let monitorTimer = null;
+    let heartbeatTimer = null;
 
     /** ============================
      * FUNÇÕES DE MONITORAMENTO
      * ============================ */
 
     function playAlertSound() {
+        if (typeof Audio === 'undefined') return;
+
         try {
             const audio = new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAIlYAAESsAAACABAAZGF0YQAAAAA=");
             audio.loop = false;
@@ -51,8 +65,21 @@
         playAlertSound();
     }
 
+    function notifyWithCooldown(msg) {
+        const now = Date.now();
+        const lastAlertAt = Number(GM_getValue(LAST_ALERT_AT_KEY, 0));
+
+        if (now - lastAlertAt < ALERT_COOLDOWN_MS) {
+            console.log("🔕 Vaga detectada, mas notificação suprimida por cooldown para evitar spam.");
+            return;
+        }
+
+        GM_setValue(LAST_ALERT_AT_KEY, now);
+        notify(msg);
+    }
+
     function saveHistory(entry) {
-        let history = GM_getValue(HISTORY_KEY, []);
+        const history = GM_getValue(HISTORY_KEY, []);
         history.push(entry);
         if (history.length > MAX_HISTORY_ENTRIES) {
             history.shift();
@@ -64,57 +91,187 @@
         return GM_getValue(HISTORY_KEY, []);
     }
 
-    // A função agora aceita um 'callback' opcional para ser executado após a conclusão
+    function extractStatusText(html) {
+        if (!html || typeof html !== 'string') return null;
+
+        // Caminho principal: parser de HTML
+        if (typeof DOMParser !== 'undefined') {
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, "text/html");
+            const statusDiv = doc.querySelector('.beta-status');
+            if (statusDiv) {
+                return statusDiv.textContent.trim().replace(/\s+/g, ' ');
+            }
+        }
+
+        // Fallback para contextos sem DOMParser (alguns backgrounds)
+        const regex = /<[^>]*class=["'][^"']*beta-status[^"']*["'][^>]*>([\s\S]*?)<\/[^>]+>/i;
+        const match = html.match(regex);
+        if (!match || !match[1]) return null;
+
+        return match[1]
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/&nbsp;/gi, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    function detectStatus(statusText) {
+        const text = (statusText || '').toLowerCase();
+
+        const openSignals = [
+            'para participar do',
+            'está aceitando novos testadores',
+            'this beta is accepting new testers',
+            'start testing'
+        ];
+
+        const fullSignals = [
+            'esta versão beta não aceita novos testers no momento',
+            "this beta isn't accepting any new testers right now",
+            'this beta is full'
+        ];
+
+        if (openSignals.some(signal => text.includes(signal))) return 'VAGO';
+        if (fullSignals.some(signal => text.includes(signal))) return 'CHEIO';
+        return 'TEXTO_DESCONHECIDO';
+    }
+
+    // A função aceita um 'callback' opcional para ser executado após a conclusão
     function checkBeta(callback) {
         GM_xmlhttpRequest({
             method: "GET",
             url: TESTFLIGHT_URL,
+            timeout: REQUEST_TIMEOUT,
+            headers: {
+                'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
+            },
             onload: function(response) {
-                const html = response.responseText;
                 const timestamp = new Date().toISOString();
-                let status, details = "";
 
-                const parser = new DOMParser();
-                const doc = parser.parseFromString(html, "text/html");
-                const statusDiv = doc.querySelector('.beta-status');
+                if (response.status < 200 || response.status >= 300) {
+                    const status = "ERRO_HTTP";
+                    const details = `Resposta HTTP inesperada: ${response.status}`;
+                    console.error(`[${new Date(timestamp).toLocaleString('pt-BR')}] ${details}`);
+                    saveHistory({ timestamp, status, details });
+                    if (typeof callback === 'function') callback();
+                    return;
+                }
 
-                if (statusDiv) {
-                    const statusText = statusDiv.textContent.trim().replace(/\s+/g, ' ');
+                const html = response.responseText;
+                const statusText = extractStatusText(html);
+                let status;
+                let details = "";
 
-                    if (statusText.includes("Para participar do")) {
-                        status = "VAGO";
+                if (statusText) {
+                    status = detectStatus(statusText);
+
+                    if (status === 'VAGO') {
                         details = `Texto de confirmação: "${statusText}"`;
                         const message = "🚀 O WhatsApp Beta abriu vagas no TestFlight!\n" + TESTFLIGHT_URL;
-                        notify(message);
+                        notifyWithCooldown(message);
                         console.log(`[${new Date(timestamp).toLocaleString('pt-BR')}] ⚡ ${status}! ⚡`);
-
-                    } else if (statusText.includes("Esta versão beta não aceita novos testers no momento.") || statusText.includes("This beta isn't accepting any new testers right now.")) {
-                        status = "CHEIO";
+                    } else if (status === 'CHEIO') {
                         details = `Texto de confirmação: "${statusText}"`;
                         console.log(`[${new Date(timestamp).toLocaleString('pt-BR')}] Status: ${status}`);
-
                     } else {
-                        status = "TEXTO_DESCONHECIDO";
                         details = `O elemento '.beta-status' retornou um texto não previsto. Texto encontrado: "${statusText}"`;
                         console.warn(`[${new Date(timestamp).toLocaleString('pt-BR')}] ${details}`);
                     }
                 } else {
                     status = "ERRO_ESTRUTURA";
-                    details = "O elemento '.beta-status' não foi encontrado. A estrutura do site da Apple pode ter mudado.";
+                    details = "Não foi possível extrair o conteúdo de '.beta-status'. A estrutura da página pode ter mudado.";
                     console.error(`[${new Date(timestamp).toLocaleString('pt-BR')}] ${details}`);
                 }
 
                 saveHistory({ timestamp, status, details: details || undefined });
-                if (typeof callback === 'function') callback(); // Executa o callback se ele existir
+                if (typeof callback === 'function') callback();
             },
             onerror: function(err) {
                 const timestamp = new Date().toISOString();
                 const status = "ERRO_CONEXAO";
                 console.error("Erro ao verificar TestFlight:", err);
-                saveHistory({ timestamp: timestamp, status: status, error: String(err) });
-                if (typeof callback === 'function') callback(); // Executa o callback em caso de erro também
+                saveHistory({ timestamp, status, error: String(err) });
+                if (typeof callback === 'function') callback();
+            },
+            ontimeout: function() {
+                const timestamp = new Date().toISOString();
+                const status = "ERRO_TIMEOUT";
+                const details = `Timeout após ${REQUEST_TIMEOUT}ms ao consultar TestFlight.`;
+                console.error(details);
+                saveHistory({ timestamp, status, details });
+                if (typeof callback === 'function') callback();
             }
         });
+    }
+
+    /** ============================
+     * CONTROLE DE LIDERANÇA (instância única)
+     * ============================ */
+
+    function readLock() {
+        return GM_getValue(LEADER_LOCK_KEY, null);
+    }
+
+    function writeLock() {
+        GM_setValue(LEADER_LOCK_KEY, { id: LEADER_ID, ts: Date.now() });
+    }
+
+    function amILeader() {
+        const lock = readLock();
+        return !!(lock && lock.id === LEADER_ID);
+    }
+
+    function tryBecomeLeader() {
+        const lock = readLock();
+        const now = Date.now();
+
+        if (!lock || !lock.id || !lock.ts || (now - Number(lock.ts)) > LEADER_TTL_MS) {
+            writeLock();
+            return amILeader();
+        }
+
+        return lock.id === LEADER_ID;
+    }
+
+    function startMonitoring() {
+        if (monitorTimer) return;
+
+        checkBeta();
+        monitorTimer = setInterval(() => {
+            if (!tryBecomeLeader()) {
+                stopMonitoring();
+                return;
+            }
+            checkBeta();
+        }, CHECK_INTERVAL);
+
+        heartbeatTimer = setInterval(() => {
+            if (amILeader()) {
+                writeLock();
+            }
+        }, LEADER_HEARTBEAT_MS);
+
+        console.log("👑 Instância líder ativa: monitoramento iniciado.");
+    }
+
+    function stopMonitoring() {
+        if (monitorTimer) {
+            clearInterval(monitorTimer);
+            monitorTimer = null;
+        }
+        if (heartbeatTimer) {
+            clearInterval(heartbeatTimer);
+            heartbeatTimer = null;
+        }
+    }
+
+    function initLeaderElection() {
+        if (tryBecomeLeader()) {
+            startMonitoring();
+        } else {
+            console.log("ℹ️ Outra instância já está monitorando. Esta instância ficará em standby.");
+        }
     }
 
     /** ============================
@@ -136,13 +293,15 @@
         const statusMap = {
             VAGO:    { icon: '🚀', text: 'VAGA DETECTADA', className: 'status-vago' },
             CHEIO:   { icon: '⛔', text: 'AINDA CHEIO', className: 'status-cheio' },
-            TEXTO_DESCONHECIDO: { icon: '⚠️', text: 'TEXTO DESCONHECIDO', className: 'status-desconhecido' },
-            ERRO_CONEXAO: { icon: '❌', text: 'ERRO DE CONEXÃO', className: 'status-erro' },
-            ERRO_ESTRUTURA: { icon: '❌', text: 'ERRO DE ESTRUTURA', className: 'status-erro' },
+            TEXTO_DESCONHECIDO: { icon: '❓', text: 'STATUS DESCONHECIDO', className: 'status-desconhecido' },
+            ERRO_ESTRUTURA: { icon: '🏗️', text: 'ERRO DE ESTRUTURA', className: 'status-erro' },
+            ERRO_CONEXAO: { icon: '🌐', text: 'ERRO DE CONEXÃO', className: 'status-erro' },
+            ERRO_TIMEOUT: { icon: '⏱️', text: 'TIMEOUT', className: 'status-erro' },
+            ERRO_HTTP: { icon: '📡', text: 'ERRO HTTP', className: 'status-erro' },
         };
 
         history.slice().reverse().forEach(entry => {
-            const statusInfo = statusMap[entry.status] || { icon: '❓', text: entry.status, className: 'status-info' };
+            const statusInfo = statusMap[entry.status] || { icon: '⚪', text: entry.status || 'DESCONHECIDO', className: 'status-info' };
             const localTime = new Date(entry.timestamp).toLocaleString('pt-BR');
 
             const logElement = document.createElement('div');
@@ -164,16 +323,14 @@
         });
     }
 
-    // NOVA FUNÇÃO: Limpa o histórico com confirmação
     function confirmAndClearHistory() {
         if (confirm("Você tem certeza que deseja limpar todo o histórico de verificação?\nEsta ação não pode ser desfeita.")) {
-            GM_setValue(HISTORY_KEY, []); // Apaga os dados
-            renderLogEntries(); // Atualiza a interface
+            GM_setValue(HISTORY_KEY, []);
+            renderLogEntries();
             console.log("Histórico de verificação foi limpo pelo usuário.");
         }
     }
 
-    // NOVA FUNÇÃO: Aciona a verificação manual
     function manualCheck() {
         const btn = document.getElementById('wbm-check-now-btn');
         if (!btn) return;
@@ -182,13 +339,18 @@
         btn.disabled = true;
 
         checkBeta(() => {
-            renderLogEntries(); // Re-renderiza o log com o novo resultado
+            renderLogEntries();
             btn.textContent = 'Verificar Agora';
             btn.disabled = false;
         });
     }
 
     function displayHistoryUI() {
+        if (typeof document === 'undefined') {
+            console.warn('Não é possível abrir a interface de histórico neste contexto sem DOM.');
+            return;
+        }
+
         if (document.getElementById('wbm-modal-container')) return;
 
         const styles = `
@@ -271,8 +433,6 @@
      * INICIALIZAÇÃO
      * ============================ */
     GM_registerMenuCommand("Ver Histórico de Verificação", displayHistoryUI, "h");
-    console.log("🔎 Monitoramento de alta precisão v4.0 iniciado...");
-    checkBeta();
-    setInterval(checkBeta, CHECK_INTERVAL);
-
+    console.log("🔎 Monitoramento de alta precisão v5.0 iniciado...");
+    initLeaderElection();
 })();
