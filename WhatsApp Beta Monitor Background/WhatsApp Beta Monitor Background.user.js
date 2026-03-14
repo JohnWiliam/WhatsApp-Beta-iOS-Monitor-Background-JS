@@ -267,12 +267,21 @@
     }
 
     function initLeaderElection() {
+    const attemptLeadership = () => {
+        // Tenta se tornar líder. Se conseguir, inicia o monitoramento.
+        // A função startMonitoring() já previne a execução múltipla, então é seguro chamar.
         if (tryBecomeLeader()) {
             startMonitoring();
-        } else {
-            console.log("ℹ️ Outra instância já está monitorando. Esta instância ficará em standby.");
         }
-    }
+    };
+
+    // Tenta assumir a liderança imediatamente ao iniciar o script.
+    attemptLeadership();
+
+    // Configura uma verificação periódica para que instâncias em standby
+    // possam assumir a liderança se ela ficar vaga.
+    setInterval(attemptLeadership, LEADER_HEARTBEAT_MS);
+}
 
     /** ============================
      * FUNÇÕES DA INTERFACE DO HISTÓRICO (UI)
