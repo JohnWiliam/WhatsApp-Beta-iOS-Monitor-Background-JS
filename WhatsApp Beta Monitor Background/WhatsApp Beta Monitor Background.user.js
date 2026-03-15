@@ -25,7 +25,11 @@
     const LAST_ALERT_AT_KEY = 'whatsappBetaLastAlertAt';
     const LEADER_LOCK_KEY = 'whatsappBetaLeaderLock';
     const SETTINGS_KEY = 'whatsappBetaSettings';
-    const TESTFLIGHT_URL = 'https://testflight.apple.com/join/s4rTJVPb';
+    const TESTFLIGHT_URLS = Object.freeze([
+        'https://testflight.apple.com/join/s4rTJVPb',
+        'https://testflight.apple.com/join/YcmGWyxV',
+        'https://testflight.apple.com/join/dH8lkFZi',
+    ]);
 
     /** ============================
      * CONFIGURAÇÕES PADRÃO
@@ -126,13 +130,26 @@
         }
     }
 
-    function notify(msg) {
+    function getTargetLabel(url) {
+        if (typeof url !== 'string') return 'Link desconhecido';
+
+        try {
+            const parsedUrl = new URL(url);
+            const segments = parsedUrl.pathname.split('/').filter(Boolean);
+            const joinCode = segments[segments.length - 1];
+            return joinCode ? `join/${joinCode}` : parsedUrl.hostname;
+        } catch {
+            return url;
+        }
+    }
+
+    function notify(msg, targetUrl) {
         GM_notification({
             title: 'WhatsApp Beta',
             text: msg,
             highlight: true,
             timeout: 0,
-            onclick: () => GM_openInTab(TESTFLIGHT_URL, { active: true }),
+            onclick: () => GM_openInTab(targetUrl, { active: true }),
         });
         playAlertSound();
     }
@@ -157,7 +174,7 @@
         }
     }
 
-    function notifyWithCooldown(msg) {
+    function notifyWithCooldown(msg, targetUrl) {
         const now = Date.now();
         const lastAlertAt = Number(GM_getValue(LAST_ALERT_AT_KEY, 0));
 
@@ -167,7 +184,7 @@
         }
 
         GM_setValue(LAST_ALERT_AT_KEY, now);
-        notify(msg);
+        notify(msg, targetUrl);
     }
 
     function getHistory() {
@@ -230,10 +247,12 @@
         return 'TEXTO_DESCONHECIDO';
     }
 
-    function checkBeta(callback) {
+    function checkBeta(targetUrl, callback) {
+        const targetLabel = getTargetLabel(targetUrl);
+
         GM_xmlhttpRequest({
             method: 'GET',
-            url: TESTFLIGHT_URL,
+            url: targetUrl,
             timeout: settings.requestTimeoutMs,
             headers: {
                 'Accept-Language': settings.acceptLanguage,
@@ -244,8 +263,8 @@
                 if (response.status < 200 || response.status >= 300) {
                     const status = 'ERRO_HTTP';
                     const details = `Resposta HTTP inesperada: ${response.status}`;
-                    console.error(`[${new Date(timestamp).toLocaleString('pt-BR')}] ${details}`);
-                    saveHistory({ timestamp, status, details });
+                    console.error(`[${new Date(timestamp).toLocaleString('pt-BR')}] [${targetLabel}] ${details}`);
+                    saveHistory({ timestamp, status, details, targetUrl, targetLabel });
                     safeCallback(callback);
                     return;
                 }
@@ -260,40 +279,58 @@
 
                     if (status === 'VAGO') {
                         details = `Texto de confirmação: "${statusText}"`;
-                        const message = `🚀 O WhatsApp Beta abriu vagas no TestFlight!\n${TESTFLIGHT_URL}`;
-                        notifyWithCooldown(message);
-                        console.log(`[${new Date(timestamp).toLocaleString('pt-BR')}] ⚡ ${status}! ⚡`);
+                        const message = `🚀 O WhatsApp Beta abriu vagas no TestFlight!\n${targetUrl}`;
+                        notifyWithCooldown(message, targetUrl);
+                        console.log(`[${new Date(timestamp).toLocaleString('pt-BR')}] [${targetLabel}] ⚡ ${status}! ⚡`);
                     } else if (status === 'CHEIO') {
                         details = `Texto de confirmação: "${statusText}"`;
-                        console.log(`[${new Date(timestamp).toLocaleString('pt-BR')}] Status: ${status}`);
+                        console.log(`[${new Date(timestamp).toLocaleString('pt-BR')}] [${targetLabel}] Status: ${status}`);
                     } else {
                         details = `O elemento '.beta-status' retornou um texto não previsto. Texto encontrado: "${statusText}"`;
-                        console.warn(`[${new Date(timestamp).toLocaleString('pt-BR')}] ${details}`);
+                        console.warn(`[${new Date(timestamp).toLocaleString('pt-BR')}] [${targetLabel}] ${details}`);
                     }
                 } else {
                     status = 'ERRO_ESTRUTURA';
                     details = "Não foi possível extrair o conteúdo de '.beta-status'. A estrutura da página pode ter mudado.";
-                    console.error(`[${new Date(timestamp).toLocaleString('pt-BR')}] ${details}`);
+                    console.error(`[${new Date(timestamp).toLocaleString('pt-BR')}] [${targetLabel}] ${details}`);
                 }
 
-                saveHistory({ timestamp, status, details: details || undefined });
+                saveHistory({ timestamp, status, details: details || undefined, targetUrl, targetLabel });
                 safeCallback(callback);
             },
             onerror: function(err) {
                 const timestamp = new Date().toISOString();
                 const status = 'ERRO_CONEXAO';
-                console.error('Erro ao verificar TestFlight:', err);
-                saveHistory({ timestamp, status, error: serializeRequestError(err) });
+                console.error(`Erro ao verificar TestFlight [${targetLabel}]:`, err);
+                saveHistory({ timestamp, status, error: serializeRequestError(err), targetUrl, targetLabel });
                 safeCallback(callback);
             },
             ontimeout: function() {
                 const timestamp = new Date().toISOString();
                 const status = 'ERRO_TIMEOUT';
                 const details = `Timeout após ${settings.requestTimeoutMs}ms ao consultar TestFlight.`;
-                console.error(details);
-                saveHistory({ timestamp, status, details });
+                console.error(`[${targetLabel}] ${details}`);
+                saveHistory({ timestamp, status, details, targetUrl, targetLabel });
                 safeCallback(callback);
             },
+        });
+    }
+
+
+    function checkAllBetas(callback) {
+        if (TESTFLIGHT_URLS.length === 0) {
+            safeCallback(callback);
+            return;
+        }
+
+        let pendingChecks = TESTFLIGHT_URLS.length;
+        TESTFLIGHT_URLS.forEach((targetUrl) => {
+            checkBeta(targetUrl, () => {
+                pendingChecks -= 1;
+                if (pendingChecks === 0) {
+                    safeCallback(callback);
+                }
+            });
         });
     }
 
@@ -329,14 +366,14 @@
     function startMonitoring() {
         if (monitorTimer) return;
 
-        checkBeta();
+        checkAllBetas();
 
         monitorTimer = setInterval(() => {
             if (!tryBecomeLeader()) {
                 stopMonitoring();
                 return;
             }
-            checkBeta();
+            checkAllBetas();
         }, settings.checkIntervalMs);
 
         heartbeatTimer = setInterval(() => {
@@ -405,7 +442,11 @@
         status.className = 'log-status';
         status.textContent = statusInfo.text;
 
-        header.append(icon, timestamp, status);
+        const target = document.createElement('span');
+        target.className = 'log-target';
+        target.textContent = `(${entry.targetLabel || getTargetLabel(entry.targetUrl)})`;
+
+        header.append(icon, timestamp, status, target);
         logElement.appendChild(header);
 
         if (entry.details || entry.error) {
@@ -466,7 +507,7 @@
         btn.textContent = 'Verificando...';
         btn.disabled = true;
 
-        checkBeta(() => {
+        checkAllBetas(() => {
             renderLogEntries();
             btn.textContent = 'Verificar Agora';
             btn.disabled = false;
@@ -570,6 +611,7 @@
             .log-icon { font-size: 1.2em; }
             .log-timestamp { color: #999; }
             .log-status { font-weight: bold; }
+            .log-target { color: #8ab4ff; }
             .log-details { margin-top: 8px; color: #bbb; padding-left: 32px; font-size: 0.95em; word-break: break-all; }
             .log-details strong { color: #ddd; }
             .status-vago { color: #28a745; }
