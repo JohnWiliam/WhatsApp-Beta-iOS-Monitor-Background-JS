@@ -1,6 +1,6 @@
 # WhatsApp-Beta-iOS-Monitor-Background-JS
 
-> Script JavaScript para a extensão **Violentmonkey** no Firefox que monitora continuamente o link público do TestFlight do WhatsApp iOS e notifica quando surgir vaga.
+> Script JavaScript para a extensão **Violentmonkey** no Firefox que monitora continuamente múltiplos links públicos do TestFlight do WhatsApp iOS e notifica quando surgir vaga.
 
 ![Version](https://img.shields.io/badge/Version-1.0.3-blue)
 ![Language](https://img.shields.io/badge/Language-JavaScript-F7DF1E?logo=javascript&logoColor=F7DF1E)
@@ -9,10 +9,13 @@
 
 ## O que o script faz
 
-- Consulta periodicamente: `https://testflight.apple.com/join/s4rTJVPb`
+- Consulta periodicamente os links:
+  - `https://testflight.apple.com/join/s4rTJVPb`
+  - `https://testflight.apple.com/join/YcmGWyxV`
+  - `https://testflight.apple.com/join/dH8lkFZi`
 - Detecta estados principais da página (`VAGO`, `CHEIO`, `TEXTO_DESCONHECIDO`)
 - Envia notificação com clique para abrir o TestFlight quando encontrar vaga
-- Registra histórico local das verificações
+- Registra histórico local das verificações com identificação do link monitorado
 - Oferece menu com interface de histórico, verificação manual e painel de configurações avançado
 
 ## Novidades da v1.0.3
