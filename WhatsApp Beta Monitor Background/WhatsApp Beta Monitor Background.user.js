@@ -55,6 +55,16 @@
     });
 
     const LEADER_ID = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const VALID_TARGET_URLS = Object.freeze([...new Set(TESTFLIGHT_URLS)].filter((url) => {
+        if (typeof url !== 'string') return false;
+
+        try {
+            const parsed = new URL(url);
+            return parsed.protocol === 'https:' && Boolean(parsed.hostname);
+        } catch {
+            return false;
+        }
+    }));
 
     let monitorTimer = null;
     let heartbeatTimer = null;
@@ -155,6 +165,20 @@
     }
 
 
+    function normalizeHistoryEntry(entry) {
+        const normalized = (entry && typeof entry === 'object') ? { ...entry } : {};
+        const validTargetUrl = typeof normalized.targetUrl === 'string' ? normalized.targetUrl : null;
+        const fallbackLabel = validTargetUrl ? getTargetLabel(validTargetUrl) : 'Link não registrado';
+        const validTargetLabel = (typeof normalized.targetLabel === 'string' && normalized.targetLabel.trim())
+            ? normalized.targetLabel.trim()
+            : fallbackLabel;
+
+        normalized.targetUrl = validTargetUrl || undefined;
+        normalized.targetLabel = validTargetLabel;
+        return normalized;
+    }
+
+
     function safeCallback(callback) {
         if (typeof callback !== 'function') return;
         try {
@@ -189,12 +213,13 @@
 
     function getHistory() {
         const history = GM_getValue(HISTORY_KEY, []);
-        return Array.isArray(history) ? history : [];
+        if (!Array.isArray(history)) return [];
+        return history.map(normalizeHistoryEntry);
     }
 
     function saveHistory(entry) {
         const history = getHistory();
-        history.push(entry);
+        history.push(normalizeHistoryEntry(entry));
 
         if (history.length > settings.maxHistoryEntries) {
             history.splice(0, history.length - settings.maxHistoryEntries);
@@ -250,84 +275,100 @@
     function checkBeta(targetUrl, callback) {
         const targetLabel = getTargetLabel(targetUrl);
 
-        GM_xmlhttpRequest({
-            method: 'GET',
-            url: targetUrl,
-            timeout: settings.requestTimeoutMs,
-            headers: {
-                'Accept-Language': settings.acceptLanguage,
-            },
-            onload: function(response) {
-                const timestamp = new Date().toISOString();
+        try {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: targetUrl,
+                timeout: settings.requestTimeoutMs,
+                headers: {
+                    'Accept-Language': settings.acceptLanguage,
+                },
+                onload: function(response) {
+                    const timestamp = new Date().toISOString();
 
-                if (response.status < 200 || response.status >= 300) {
-                    const status = 'ERRO_HTTP';
-                    const details = `Resposta HTTP inesperada: ${response.status}`;
-                    console.error(`[${new Date(timestamp).toLocaleString('pt-BR')}] [${targetLabel}] ${details}`);
+                    if (response.status < 200 || response.status >= 300) {
+                        const status = 'ERRO_HTTP';
+                        const details = `Resposta HTTP inesperada: ${response.status}`;
+                        console.error(`[${new Date(timestamp).toLocaleString('pt-BR')}] [${targetLabel}] ${details}`);
+                        saveHistory({ timestamp, status, details, targetUrl, targetLabel });
+                        safeCallback(callback);
+                        return;
+                    }
+
+                    const html = response.responseText;
+                    const statusText = extractStatusText(html);
+                    let status;
+                    let details = '';
+
+                    if (statusText) {
+                        status = detectStatus(statusText);
+
+                        if (status === 'VAGO') {
+                            details = `Texto de confirmação: "${statusText}"`;
+                            const message = `🚀 O WhatsApp Beta abriu vagas no TestFlight!\n${targetUrl}`;
+                            notifyWithCooldown(message, targetUrl);
+                            console.log(`[${new Date(timestamp).toLocaleString('pt-BR')}] [${targetLabel}] ⚡ ${status}! ⚡`);
+                        } else if (status === 'CHEIO') {
+                            details = `Texto de confirmação: "${statusText}"`;
+                            console.log(`[${new Date(timestamp).toLocaleString('pt-BR')}] [${targetLabel}] Status: ${status}`);
+                        } else {
+                            details = `O elemento '.beta-status' retornou um texto não previsto. Texto encontrado: "${statusText}"`;
+                            console.warn(`[${new Date(timestamp).toLocaleString('pt-BR')}] [${targetLabel}] ${details}`);
+                        }
+                    } else {
+                        status = 'ERRO_ESTRUTURA';
+                        details = "Não foi possível extrair o conteúdo de '.beta-status'. A estrutura da página pode ter mudado.";
+                        console.error(`[${new Date(timestamp).toLocaleString('pt-BR')}] [${targetLabel}] ${details}`);
+                    }
+
+                    saveHistory({ timestamp, status, details: details || undefined, targetUrl, targetLabel });
+                    safeCallback(callback);
+                },
+                onerror: function(err) {
+                    const timestamp = new Date().toISOString();
+                    const status = 'ERRO_CONEXAO';
+                    console.error(`Erro ao verificar TestFlight [${targetLabel}]:`, err);
+                    saveHistory({ timestamp, status, error: serializeRequestError(err), targetUrl, targetLabel });
+                    safeCallback(callback);
+                },
+                ontimeout: function() {
+                    const timestamp = new Date().toISOString();
+                    const status = 'ERRO_TIMEOUT';
+                    const details = `Timeout após ${settings.requestTimeoutMs}ms ao consultar TestFlight.`;
+                    console.error(`[${targetLabel}] ${details}`);
                     saveHistory({ timestamp, status, details, targetUrl, targetLabel });
                     safeCallback(callback);
-                    return;
-                }
-
-                const html = response.responseText;
-                const statusText = extractStatusText(html);
-                let status;
-                let details = '';
-
-                if (statusText) {
-                    status = detectStatus(statusText);
-
-                    if (status === 'VAGO') {
-                        details = `Texto de confirmação: "${statusText}"`;
-                        const message = `🚀 O WhatsApp Beta abriu vagas no TestFlight!\n${targetUrl}`;
-                        notifyWithCooldown(message, targetUrl);
-                        console.log(`[${new Date(timestamp).toLocaleString('pt-BR')}] [${targetLabel}] ⚡ ${status}! ⚡`);
-                    } else if (status === 'CHEIO') {
-                        details = `Texto de confirmação: "${statusText}"`;
-                        console.log(`[${new Date(timestamp).toLocaleString('pt-BR')}] [${targetLabel}] Status: ${status}`);
-                    } else {
-                        details = `O elemento '.beta-status' retornou um texto não previsto. Texto encontrado: "${statusText}"`;
-                        console.warn(`[${new Date(timestamp).toLocaleString('pt-BR')}] [${targetLabel}] ${details}`);
-                    }
-                } else {
-                    status = 'ERRO_ESTRUTURA';
-                    details = "Não foi possível extrair o conteúdo de '.beta-status'. A estrutura da página pode ter mudado.";
-                    console.error(`[${new Date(timestamp).toLocaleString('pt-BR')}] [${targetLabel}] ${details}`);
-                }
-
-                saveHistory({ timestamp, status, details: details || undefined, targetUrl, targetLabel });
-                safeCallback(callback);
-            },
-            onerror: function(err) {
-                const timestamp = new Date().toISOString();
-                const status = 'ERRO_CONEXAO';
-                console.error(`Erro ao verificar TestFlight [${targetLabel}]:`, err);
-                saveHistory({ timestamp, status, error: serializeRequestError(err), targetUrl, targetLabel });
-                safeCallback(callback);
-            },
-            ontimeout: function() {
-                const timestamp = new Date().toISOString();
-                const status = 'ERRO_TIMEOUT';
-                const details = `Timeout após ${settings.requestTimeoutMs}ms ao consultar TestFlight.`;
-                console.error(`[${targetLabel}] ${details}`);
-                saveHistory({ timestamp, status, details, targetUrl, targetLabel });
-                safeCallback(callback);
-            },
-        });
+                },
+            });
+        } catch (err) {
+            const timestamp = new Date().toISOString();
+            const status = 'ERRO_CONEXAO';
+            const details = `Falha ao iniciar requisição: ${serializeRequestError(err)}`;
+            console.error(`[${targetLabel}] ${details}`);
+            saveHistory({ timestamp, status, details, targetUrl, targetLabel });
+            safeCallback(callback);
+        }
     }
 
 
     function checkAllBetas(callback) {
-        if (TESTFLIGHT_URLS.length === 0) {
+        const urlsToCheck = VALID_TARGET_URLS;
+
+        if (urlsToCheck.length === 0) {
+            console.warn('Nenhuma URL válida configurada para monitoramento.');
             safeCallback(callback);
             return;
         }
 
-        let pendingChecks = TESTFLIGHT_URLS.length;
-        TESTFLIGHT_URLS.forEach((targetUrl) => {
+        const timestamp = new Date().toLocaleString('pt-BR');
+        console.log(`[${timestamp}] Iniciando ciclo de verificação de ${urlsToCheck.length} URL(s).`);
+
+        let pendingChecks = urlsToCheck.length;
+        urlsToCheck.forEach((targetUrl) => {
             checkBeta(targetUrl, () => {
                 pendingChecks -= 1;
                 if (pendingChecks === 0) {
+                    console.log(`[${new Date().toLocaleString('pt-BR')}] Ciclo de verificação concluído. ${urlsToCheck.length} URL(s) processadas.`);
                     safeCallback(callback);
                 }
             });
@@ -571,22 +612,24 @@
             #wbm-modal-header h2 { margin: 0; font-size: 1.4em; color: #fff; font-weight: 600; }
             #wbm-modal-buttons { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
             .wbm-btn {
-                background: linear-gradient(180deg, #3a3a3a, #2b2b2b);
-                color: #fff;
-                border: 1px solid #5d5d5d;
-                padding: 8px 14px;
-                border-radius: 8px;
+                background: linear-gradient(180deg, #3e4754, #2f3743);
+                color: #eef3f9;
+                border: 1px solid rgba(177, 190, 208, 0.35);
+                padding: 9px 15px;
+                border-radius: 10px;
                 cursor: pointer;
                 font-size: 0.9em;
                 font-weight: 600;
-                transition: transform 0.15s ease, background-color 0.2s, border-color 0.2s, box-shadow 0.2s;
-                box-shadow: 0 1px 0 rgba(255,255,255,0.08) inset;
+                letter-spacing: 0.01em;
+                transition: transform 0.14s ease, background-color 0.2s, border-color 0.2s, box-shadow 0.2s, filter 0.2s;
+                box-shadow: 0 8px 18px rgba(0, 0, 0, 0.22), 0 1px 0 rgba(255,255,255,0.1) inset;
             }
-            .wbm-btn:hover { background: linear-gradient(180deg, #474747, #323232); border-color: #818181; }
-            .wbm-btn:active { transform: translateY(1px); }
-            .wbm-btn:disabled { background: #2a2a2a; color: #777; cursor: not-allowed; border-color: #444; box-shadow: none; }
-            .wbm-btn--danger { background: linear-gradient(180deg, #cd3a48, #b62936); border-color: #d64e5b; }
-            .wbm-btn--danger:hover { background: linear-gradient(180deg, #dd4957, #c23442); border-color: #e36d78; }
+            .wbm-btn:hover { background: linear-gradient(180deg, #4a5565, #38414f); border-color: rgba(204, 218, 236, 0.55); }
+            .wbm-btn:active { transform: translateY(1px) scale(0.99); filter: brightness(0.96); }
+            .wbm-btn:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(130, 172, 224, 0.45), 0 8px 18px rgba(0, 0, 0, 0.22); }
+            .wbm-btn:disabled { background: #2b3138; color: #7f8893; cursor: not-allowed; border-color: #46505c; box-shadow: none; }
+            .wbm-btn--danger { background: linear-gradient(180deg, #b74a56, #943843); border-color: rgba(236, 162, 171, 0.4); }
+            .wbm-btn--danger:hover { background: linear-gradient(180deg, #c95864, #a0424d); border-color: rgba(246, 188, 195, 0.62); }
             #wbm-settings-btn { min-width: 42px; font-size: 1.1em; padding: 7px 10px; }
             #wbm-settings-panel {
                 display: none; background: #202020; border: 1px solid #3a3a3a; border-radius: 10px; padding: 12px;
