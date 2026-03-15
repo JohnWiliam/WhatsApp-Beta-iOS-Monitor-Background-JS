@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WhatsApp Beta Monitor Background
 // @namespace    http://tampermonkey.net/
-// @version      1.0.2
+// @version      1.0.3
 // @description  Monitoramento contínuo com histórico, verificação manual e notificação anti-spam quando surgir vaga.
 // @author       John Wiliam
 // @icon         https://web.whatsapp.com//favicon/1x/favicon/v1/
@@ -25,12 +25,12 @@
     const LAST_ALERT_AT_KEY = 'whatsappBetaLastAlertAt';
     const LEADER_LOCK_KEY = 'whatsappBetaLeaderLock';
     const SETTINGS_KEY = 'whatsappBetaSettings';
+    const TESTFLIGHT_URL = 'https://testflight.apple.com/join/s4rTJVPb';
 
     /** ============================
      * CONFIGURAÇÕES PADRÃO
      * ============================ */
     const DEFAULT_SETTINGS = Object.freeze({
-        testflightUrl: 'https://testflight.apple.com/join/s4rTJVPb',
         checkIntervalMs: 300000,
         requestTimeoutMs: 20000,
         maxHistoryEntries: 100,
@@ -41,7 +41,6 @@
     });
 
     const SETTINGS_SCHEMA = Object.freeze({
-        testflightUrl: { type: 'url' },
         checkIntervalMs: { type: 'int', min: 15000, max: 86400000 },
         requestTimeoutMs: { type: 'int', min: 5000, max: 120000 },
         maxHistoryEntries: { type: 'int', min: 20, max: 1000 },
@@ -66,20 +65,6 @@
         return Math.min(max, Math.max(min, value));
     }
 
-    function normalizeUrl(value, fallback) {
-        if (typeof value !== 'string') return fallback;
-        const trimmed = value.trim();
-        if (!trimmed) return fallback;
-
-        try {
-            const parsed = new URL(trimmed);
-            if (!['http:', 'https:'].includes(parsed.protocol)) return fallback;
-            return parsed.toString();
-        } catch {
-            return fallback;
-        }
-    }
-
     function sanitizeSettings(input) {
         const source = (input && typeof input === 'object') ? input : {};
         const sanitized = { ...DEFAULT_SETTINGS };
@@ -92,11 +77,6 @@
                 if (Number.isFinite(value)) {
                     sanitized[key] = clamp(Math.round(value), rule.min, rule.max);
                 }
-                continue;
-            }
-
-            if (rule.type === 'url') {
-                sanitized[key] = normalizeUrl(candidate, DEFAULT_SETTINGS[key]);
                 continue;
             }
 
@@ -152,9 +132,29 @@
             text: msg,
             highlight: true,
             timeout: 0,
-            onclick: () => GM_openInTab(settings.testflightUrl, { active: true }),
+            onclick: () => GM_openInTab(TESTFLIGHT_URL, { active: true }),
         });
         playAlertSound();
+    }
+
+
+    function safeCallback(callback) {
+        if (typeof callback !== 'function') return;
+        try {
+            callback();
+        } catch (error) {
+            console.error('Erro ao executar callback:', error);
+        }
+    }
+
+    function serializeRequestError(err) {
+        if (err instanceof Error) return `${err.name}: ${err.message}`;
+        if (typeof err === 'string') return err;
+        try {
+            return JSON.stringify(err);
+        } catch {
+            return String(err);
+        }
     }
 
     function notifyWithCooldown(msg) {
@@ -233,7 +233,7 @@
     function checkBeta(callback) {
         GM_xmlhttpRequest({
             method: 'GET',
-            url: settings.testflightUrl,
+            url: TESTFLIGHT_URL,
             timeout: settings.requestTimeoutMs,
             headers: {
                 'Accept-Language': settings.acceptLanguage,
@@ -246,7 +246,7 @@
                     const details = `Resposta HTTP inesperada: ${response.status}`;
                     console.error(`[${new Date(timestamp).toLocaleString('pt-BR')}] ${details}`);
                     saveHistory({ timestamp, status, details });
-                    if (typeof callback === 'function') callback();
+                    safeCallback(callback);
                     return;
                 }
 
@@ -260,7 +260,7 @@
 
                     if (status === 'VAGO') {
                         details = `Texto de confirmação: "${statusText}"`;
-                        const message = `🚀 O WhatsApp Beta abriu vagas no TestFlight!\n${settings.testflightUrl}`;
+                        const message = `🚀 O WhatsApp Beta abriu vagas no TestFlight!\n${TESTFLIGHT_URL}`;
                         notifyWithCooldown(message);
                         console.log(`[${new Date(timestamp).toLocaleString('pt-BR')}] ⚡ ${status}! ⚡`);
                     } else if (status === 'CHEIO') {
@@ -277,14 +277,14 @@
                 }
 
                 saveHistory({ timestamp, status, details: details || undefined });
-                if (typeof callback === 'function') callback();
+                safeCallback(callback);
             },
             onerror: function(err) {
                 const timestamp = new Date().toISOString();
                 const status = 'ERRO_CONEXAO';
                 console.error('Erro ao verificar TestFlight:', err);
-                saveHistory({ timestamp, status, error: String(err) });
-                if (typeof callback === 'function') callback();
+                saveHistory({ timestamp, status, error: serializeRequestError(err) });
+                safeCallback(callback);
             },
             ontimeout: function() {
                 const timestamp = new Date().toISOString();
@@ -292,7 +292,7 @@
                 const details = `Timeout após ${settings.requestTimeoutMs}ms ao consultar TestFlight.`;
                 console.error(details);
                 saveHistory({ timestamp, status, details });
-                if (typeof callback === 'function') callback();
+                safeCallback(callback);
             },
         });
     }
@@ -477,6 +477,12 @@
         for (const key of Object.keys(DEFAULT_SETTINGS)) {
             const input = form.querySelector(`[name="${key}"]`);
             if (!input) continue;
+            const value = Number(values[key]);
+            if (input.dataset.unit === 'seconds' && Number.isFinite(value)) {
+                input.value = String(Math.round(value / 1000));
+                continue;
+            }
+
             input.value = String(values[key]);
         }
     }
@@ -485,7 +491,16 @@
         const formData = new FormData(form);
         const raw = {};
         for (const key of Object.keys(DEFAULT_SETTINGS)) {
-            raw[key] = formData.get(key);
+            const input = form.querySelector(`[name="${key}"]`);
+            const formValue = formData.get(key);
+
+            if (input && input.dataset.unit === 'seconds') {
+                const valueInSeconds = Number(formValue);
+                raw[key] = Number.isFinite(valueInSeconds) ? valueInSeconds * 1000 : formValue;
+                continue;
+            }
+
+            raw[key] = formValue;
         }
         return sanitizeSettings(raw);
     }
@@ -514,13 +529,23 @@
             }
             #wbm-modal-header h2 { margin: 0; font-size: 1.4em; color: #fff; font-weight: 600; }
             #wbm-modal-buttons { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-            #wbm-modal-buttons button {
-                background-color: #333; color: #fff; border: 1px solid #555; padding: 8px 14px;
-                border-radius: 8px; cursor: pointer; font-size: 0.9em; transition: background-color 0.2s, border-color 0.2s;
+            .wbm-btn {
+                background: linear-gradient(180deg, #3a3a3a, #2b2b2b);
+                color: #fff;
+                border: 1px solid #5d5d5d;
+                padding: 8px 14px;
+                border-radius: 8px;
+                cursor: pointer;
+                font-size: 0.9em;
+                font-weight: 600;
+                transition: transform 0.15s ease, background-color 0.2s, border-color 0.2s, box-shadow 0.2s;
+                box-shadow: 0 1px 0 rgba(255,255,255,0.08) inset;
             }
-            #wbm-modal-buttons button:hover { background-color: #444; border-color: #777; }
-            #wbm-modal-buttons button:disabled { background-color: #2a2a2a; color: #777; cursor: not-allowed; border-color: #444; }
-            #wbm-clear-btn:hover { background-color: #c82333; border-color: #bd2130; }
+            .wbm-btn:hover { background: linear-gradient(180deg, #474747, #323232); border-color: #818181; }
+            .wbm-btn:active { transform: translateY(1px); }
+            .wbm-btn:disabled { background: #2a2a2a; color: #777; cursor: not-allowed; border-color: #444; box-shadow: none; }
+            .wbm-btn--danger { background: linear-gradient(180deg, #cd3a48, #b62936); border-color: #d64e5b; }
+            .wbm-btn--danger:hover { background: linear-gradient(180deg, #dd4957, #c23442); border-color: #e36d78; }
             #wbm-settings-btn { min-width: 42px; font-size: 1.1em; padding: 7px 10px; }
             #wbm-settings-panel {
                 display: none; background: #202020; border: 1px solid #3a3a3a; border-radius: 10px; padding: 12px;
@@ -531,6 +556,7 @@
             }
             .wbm-field { display: flex; flex-direction: column; gap: 5px; }
             .wbm-field label { font-size: 0.82em; color: #b8b8b8; }
+            .wbm-field small { font-size: 0.75em; color: #8e8e8e; line-height: 1.35; }
             .wbm-field input {
                 background: #2a2a2a; border: 1px solid #4a4a4a; border-radius: 7px; color: #f0f0f0;
                 padding: 8px; font-size: 0.88em;
@@ -564,27 +590,26 @@
                 <div id="wbm-modal-header">
                     <h2>Histórico do Monitor</h2>
                     <div id="wbm-modal-buttons">
-                        <button id="wbm-settings-btn" title="Abrir/fechar configurações">⚙️</button>
-                        <button id="wbm-check-now-btn" title="Força uma verificação imediata">Verificar Agora</button>
-                        <button id="wbm-refresh-btn" title="Recarrega o histórico da memória">Atualizar</button>
-                        <button id="wbm-clear-btn" title="Apaga permanentemente todo o histórico">Limpar Histórico</button>
-                        <button id="wbm-close-btn">Fechar</button>
+                        <button id="wbm-settings-btn" class="wbm-btn" title="Abrir/fechar configurações">⚙️</button>
+                        <button id="wbm-check-now-btn" class="wbm-btn" title="Força uma verificação imediata">Verificar Agora</button>
+                        <button id="wbm-refresh-btn" class="wbm-btn" title="Recarrega o histórico da memória">Atualizar</button>
+                        <button id="wbm-clear-btn" class="wbm-btn wbm-btn--danger" title="Apaga permanentemente todo o histórico">Limpar Histórico</button>
+                        <button id="wbm-close-btn" class="wbm-btn">Fechar</button>
                     </div>
                 </div>
                 <div id="wbm-settings-panel">
                     <form id="wbm-settings-form">
-                        <div class="wbm-field"><label for="wbm-testflight-url">URL do TestFlight</label><input id="wbm-testflight-url" name="testflightUrl" type="url" required></div>
-                        <div class="wbm-field"><label for="wbm-check-interval">Intervalo de verificação (ms)</label><input id="wbm-check-interval" name="checkIntervalMs" type="number" min="15000" max="86400000" required></div>
-                        <div class="wbm-field"><label for="wbm-request-timeout">Timeout da requisição (ms)</label><input id="wbm-request-timeout" name="requestTimeoutMs" type="number" min="5000" max="120000" required></div>
-                        <div class="wbm-field"><label for="wbm-history-size">Tamanho do histórico</label><input id="wbm-history-size" name="maxHistoryEntries" type="number" min="20" max="1000" required></div>
-                        <div class="wbm-field"><label for="wbm-alert-cooldown">Cooldown de alerta (ms)</label><input id="wbm-alert-cooldown" name="alertCooldownMs" type="number" min="60000" max="86400000" required></div>
-                        <div class="wbm-field"><label for="wbm-leader-ttl">TTL de liderança (ms)</label><input id="wbm-leader-ttl" name="leaderTtlMs" type="number" min="30000" max="600000" required></div>
-                        <div class="wbm-field"><label for="wbm-leader-heartbeat">Heartbeat de liderança (ms)</label><input id="wbm-leader-heartbeat" name="leaderHeartbeatMs" type="number" min="5000" max="300000" required></div>
-                        <div class="wbm-field"><label for="wbm-accept-language">Header Accept-Language</label><input id="wbm-accept-language" name="acceptLanguage" type="text" minlength="2" maxlength="120" required></div>
+                        <div class="wbm-field"><label for="wbm-check-interval">Intervalo de verificação (segundos)</label><input id="wbm-check-interval" name="checkIntervalMs" type="number" min="15" max="86400" step="1" data-unit="seconds" required><small>Define de quanto em quanto tempo o script consulta o TestFlight.</small></div>
+                        <div class="wbm-field"><label for="wbm-request-timeout">Timeout da requisição (segundos)</label><input id="wbm-request-timeout" name="requestTimeoutMs" type="number" min="5" max="120" step="1" data-unit="seconds" required><small>Tempo máximo de espera por resposta de rede antes de registrar timeout.</small></div>
+                        <div class="wbm-field"><label for="wbm-history-size">Tamanho do histórico</label><input id="wbm-history-size" name="maxHistoryEntries" type="number" min="20" max="1000" required><small>Quantidade máxima de eventos armazenados localmente.</small></div>
+                        <div class="wbm-field"><label for="wbm-alert-cooldown">Intervalo mínimo entre alertas (segundos)</label><input id="wbm-alert-cooldown" name="alertCooldownMs" type="number" min="60" max="86400" step="1" data-unit="seconds" required><small>Evita spam quando a vaga continua aberta por muito tempo.</small></div>
+                        <div class="wbm-field"><label for="wbm-leader-ttl">Expiração do líder (segundos)</label><input id="wbm-leader-ttl" name="leaderTtlMs" type="number" min="30" max="600" step="1" data-unit="seconds" required><small>Se o líder parar de atualizar o lock nesse prazo, outra aba assume.</small></div>
+                        <div class="wbm-field"><label for="wbm-leader-heartbeat">Heartbeat do líder (segundos)</label><input id="wbm-leader-heartbeat" name="leaderHeartbeatMs" type="number" min="5" max="300" step="1" data-unit="seconds" required><small>Frequência com que a aba líder renova o lock de monitoramento.</small></div>
+                        <div class="wbm-field"><label for="wbm-accept-language">Header Accept-Language</label><input id="wbm-accept-language" name="acceptLanguage" type="text" minlength="2" maxlength="120" required><small>Ajuda a manter respostas consistentes de idioma da página monitorada.</small></div>
                         <div id="wbm-settings-feedback" aria-live="polite"></div>
                         <div id="wbm-settings-actions">
-                            <button type="button" id="wbm-settings-reset-btn" title="Restaurar valores padrão">Restaurar Padrão</button>
-                            <button type="submit" id="wbm-settings-save-btn" title="Salvar e aplicar as configurações">Salvar Configurações</button>
+                            <button type="button" class="wbm-btn" id="wbm-settings-reset-btn" title="Restaurar valores padrão">Restaurar Padrão</button>
+                            <button type="submit" class="wbm-btn" id="wbm-settings-save-btn" title="Salvar e aplicar as configurações">Salvar Configurações</button>
                         </div>
                     </form>
                 </div>
@@ -652,6 +677,6 @@
      * INICIALIZAÇÃO
      * ============================ */
     GM_registerMenuCommand('Ver Histórico de Verificação', displayHistoryUI, 'h');
-    console.log('🔎 Monitoramento de alta precisão v1.0.2 iniciado...');
+    console.log('🔎 Monitoramento de alta precisão v1.0.3 iniciado...');
     initLeaderElection();
 })();
